@@ -1,0 +1,75 @@
+# Media Cleaner
+
+A private, browser-based image and video metadata cleaner. Select a file, see its preview, press **Clean metadata**, compare the result, then **Save cleaned file** or **Delete output**.
+
+**Intended GitHub Pages URL:** https://Kksrlr03.github.io/media-cleaner/
+
+## What it does
+
+- Drag-and-drop or browse for an image/video, with an immediate original preview when the browser supports the format.
+- Removes supported descriptive metadata: camera/GPS/EXIF fields, software information, comments, generation prompts, XMP, embedded file-level provenance, timestamps and trailing image payloads.
+- Preserves the image's encoded picture data for PNG, JPEG, WebP and GIF, including animation.
+- Copies original video and audio streams without re-encoding, checking their SHA-256 stream fingerprints before and after.
+- Retains the technical color, orientation, alpha, HDR, animation and codec information required for correct playback.
+- Provides Original/Cleaned views, an editable download name, native Save As where supported, normal downloads elsewhere, and an optional verification report.
+- Delete revokes previews, releases in-tab media, deletes the video engine's temporary virtual files and terminates its worker. It cannot delete the original or previously downloaded copies from your device.
+- No media uploads, accounts, database, analytics or external processing service. Media is held in browser memory only.
+
+## Formats and quality
+
+| Input | Output | Quality handling |
+|---|---|---|
+| PNG, including 16-bit and APNG | PNG | Original encoded picture/animation chunks retained and hashed |
+| JPEG, including progressive | JPEG | Original encoded picture data retained and hashed |
+| WebP, including animation | WebP | Original encoded picture/animation chunks retained and hashed |
+| GIF, including animation | GIF | Original image data, frame timing and loop behavior retained |
+| Ordinary BMP / single-page TIFF | PNG | Lossless export, decoded pixel hashes compared at original precision |
+| MP4, MOV, M4V, WebM, MKV, AVI | Same container (M4V uses MP4) | Video/audio stream copy; SHA-256 packet fingerprints and playback properties checked |
+
+Limits: images 50 MB, videos 100 MB. BMP/TIFF decoding is limited to 40 megapixels. TIFFs with custom profiles, special orientation, floating point or multiple pages fail safely instead of being silently downgraded. Browsers may not preview every supported container/codec; preview failure does not imply conversion. A video that cannot pass the lossless checks is rejected, never automatically re-encoded. Video subtitles, chapters, attached artwork and non-media data streams are excluded. Necessary structural tags may remain and appear in the report.
+
+Cleaning does **not** remove visible/pixel-level watermarks, promise an AI-detector bypass, change labels already applied to social posts, or remove every item inside compressed codec payloads. This is file metadata cleanup, not an origin-verification or secure-erasure product. Color profiles may contain descriptive text; they are retained to preserve accurate appearance.
+
+## Run locally
+
+Requires Node.js 22.12+ (Node 24 recommended).
+
+```sh
+npm ci
+npm run build
+npm run preview
+```
+
+Open the printed localhost URL. For development, run `npm run build` once to copy the video engine, then `npm run dev`. Serve the site over HTTPS or localhost for Web Crypto and worker support. Opening `index.html` with `file://` is not supported.
+
+Video/BMP/TIFF tools download about 31 MB on first use. The single-thread FFmpeg core runs in a Web Worker and does not require special COOP/COEP headers, making it compatible with GitHub Pages. Processing speed and maximum practical file size depend on device memory. No media is put into localStorage, IndexedDB or a service-worker cache.
+
+## Publish using GitHub Pages
+
+1. Push this project to the `main` branch of `Kksrlr03/media-cleaner`.
+2. Open **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+3. The **Test and deploy GitHub Pages** workflow installs dependencies, runs unit tests, builds the site and publishes `dist`.
+4. Open the deployment URL reported by the workflow. For this repository it should be `https://Kksrlr03.github.io/media-cleaner/`.
+
+The app uses relative asset URLs and self-hosts its video engine. It can also be deployed by uploading the `dist/` folder to any static HTTPS host. Do not deploy the source folder as-is: `npm run build` generates the compiled app and copies the video engine.
+
+## Checks
+
+```sh
+npm test
+npm run build
+npx playwright install chromium
+npm run test:browser
+```
+
+On Windows the browser suite uses installed Microsoft Edge; on Linux it uses Playwright Chromium. Browser checks exercise original preview, unchanged rendered image pixels, before/after switching, real video stream cleanup, BMP/TIFF pixel verification, named downloads, canceled Save As, deletion, responsive layout and absence of media uploads. Fixtures are synthetic and contain no user photos.
+
+## Implementation
+
+- `src/image-cleaner.mjs`: audited image-container parsing, removal, checksums and encoded-data verification.
+- `src/video-cleaner.js`: lazy FFmpeg WebAssembly, stream-copy remuxing and hash/property verification; safe raster conversion.
+- `src/main.js`: local previews, lifecycle, downloads, deletion and interface state.
+- `scripts/copy-core.mjs`: bundles the single-thread engine for static hosting.
+- `.github/workflows/pages.yml`: tests, build and GitHub Pages deployment.
+
+Third-party software and licensing are described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
