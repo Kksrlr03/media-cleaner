@@ -75,7 +75,8 @@ function cleanPng(bytes) {
       if (rendering.has(kind)) preserved.push(`Rendering information (${kind})`);
     } else {
       requireBytes(kind[0] === kind[0].toLowerCase(), `Unknown critical PNG chunk ${kind}; skipped to preserve the image.`);
-      removed.push(({ tEXt:'Text / generation workflow', iTXt:'XMP / text / content credentials', zTXt:'Compressed text', pHYs:'Print resolution', tIME:'Timestamp' })[kind] || `Optional ${kind} data`);
+      const keyword=['tEXt','iTXt','zTXt'].includes(kind)?text(bytes.subarray(pos+8,Math.min(end-4,pos+88))).split('\0')[0].replace(/[^a-zA-Z0-9 .:_/-]/g,'').slice(0,80):'';
+      removed.push((keyword?`Text metadata (${keyword})`:null)||({ tEXt:'Text / generation workflow', iTXt:'XMP / text / content credentials', zTXt:'Compressed text', pHYs:'Print resolution', tIME:'Timestamp' })[kind] || `Optional ${kind} data`);
     }
     pos = end;
     if (kind === 'IEND') { requireBytes(size === 0); ended = true; break; }
@@ -113,6 +114,11 @@ function cleanJpeg(bytes) {
       parts.push(bytes.subarray(start,end)); preserved.push('Adobe color transform');
     } else if (marker === 0xe0 && text(payload.subarray(0,5)) === 'JFIF\0' && payload.length >= 14) {
       const basic = payload.slice(0,14); basic[12] = 0; basic[13] = 0;
+      const x=basic[8]*256+basic[9],y=basic[10]*256+basic[11];
+      if(x>0&&x===y){
+        if(basic[7]!==0||x!==1)removed.push('JFIF print resolution');
+        basic[7]=0;basic[8]=0;basic[9]=1;basic[10]=0;basic[11]=1;
+      } else preserved.push('Pixel aspect ratio');
       parts.push(jpegSegment(marker,basic)); preserved.push('JFIF rendering header');
       if (payload.length > 14) removed.push('Embedded thumbnail');
     } else if ((marker >= 0xe0 && marker <= 0xef) || marker === 0xfe) {
@@ -222,11 +228,12 @@ export async function cleanImage(input) {
   const source = input instanceof Uint8Array ? input : new Uint8Array(input);
   const output = parse(source), recheck=parse(output.bytes);
   const originalHash=await sha256(output.imageData), cleanedHash=await sha256(recheck.imageData);
+  const fileBytesIdentical=source.length===output.bytes.length&&source.every((value,i)=>value===output.bytes[i]);
   requireBytes(originalHash===cleanedHash,'Image data verification failed. No output was produced.');
   requireBytes(recheck.bytes.length===output.bytes.length && recheck.bytes.every((value,i)=>value===output.bytes[i]),'Metadata verification failed.');
   return {...output,report:{
     version:1,kind:'image',method:'Lossless container cleaning; no pixel recompression',
-    format:output.extension,removed:[...new Set(output.removed)],removedCount:output.removed.length,
+    format:output.extension,fileBytesIdentical,inputSha256:await sha256(source),removed:fileBytesIdentical?[]:[...new Set(output.removed)],removedCount:fileBytesIdentical?0:output.removed.length,
     preserved:[...new Set(output.preserved)],encodedImageDataIdentical:true,
     imageDataSha256:originalHash,outputSha256:await sha256(output.bytes),
     inputBytes:source.length,outputBytes:output.bytes.length,

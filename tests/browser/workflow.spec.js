@@ -77,3 +77,36 @@ for(const name of ['bmp','tiff']){
     await expect(page.locator('#verification-content')).toContainText('Decoded image pixels verified unchanged');
   });
 }
+
+ test('Already clean file reports byte-identical output explicitly',async({page})=>{
+  await page.addInitScript(()=>Object.defineProperty(window,'showSaveFilePicker',{value:undefined,configurable:true}));
+  await page.goto('/');await upload(page,'jpeg');await page.locator('#clean-button').click();await waitReady(page);
+  const pending=page.waitForEvent('download');await page.locator('#download-button').click();
+  const content=await readFile(await (await pending).path());
+  await page.locator('#file-input').setInputFiles({name:'already-clean.jpg',mimeType:'image/jpeg',buffer:content});
+  await page.locator('#clean-button').click();await waitReady(page);
+  await expect(page.locator('#control-title')).toHaveText('No changes needed. File already clean.');
+  await expect(page.locator('#verification-content')).toContainText('File bytes unchanged (SHA-256 match).');
+  await expect(page.locator('#removed-count')).toHaveText('0');
+});
+
+for(const name of ['png','jpeg']){
+ test(`${name}: deeper export preserves browser rendered pixels`,async({page})=>{
+  await page.goto('/');await upload(page,name);const before=await renderedPixels(page);
+  await page.locator('#deep-clean').check();await page.locator('#clean-button').click();await waitReady(page);
+  expect(await renderedPixels(page)).toEqual(before);
+  await expect(page.locator('#output-extension')).toHaveText('.png');
+  await expect(page.locator('#verification-content')).toContainText('Original container, application headers and profile payloads replaced');
+ });
+}
+test('Deeper H264 cleaning verifies decoded video and audio',async({page})=>{
+ await page.goto('/');await upload(page,'mp4');await page.locator('#deep-clean').check();
+ await page.locator('#clean-button').click();await waitReady(page);
+ await expect(page.locator('#verification-content')).toContainText('Decoded video and audio verified unchanged');
+ await expect(page.locator('#verification-content')).toContainText('H.264 SEI supplemental data');
+});
+test('Deeper mode rejects GIF instead of dropping animation',async({page})=>{
+ await page.goto('/');await upload(page,'gif');await page.locator('#deep-clean').check();
+ await page.locator('#clean-button').click();await expect(page.locator('#status')).toContainText('standard cleaning');
+ await expect(page.locator('#download-button')).toBeHidden();
+});

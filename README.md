@@ -73,3 +73,12 @@ On Windows the browser suite uses installed Microsoft Edge; on Linux it uses Pla
 - `.github/workflows/pages.yml`: tests, build and GitHub Pages deployment.
 
 Third-party software and licensing are described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+
+### Deeper cleaning (optional)
+
+The checkbox adds a fresh, browser-rendered sRGB PNG export for supported still JPEG/PNG/WebP images. Original container/application/profile payloads are replaced. Browser-rendered RGBA hashes must match; the original encoding/color space is not preserved and output can be larger. Animated and 16-bit sources are rejected in this mode. Standard cleaning retains their original containers.
+
+For 8-bit SDR H.264 videos up to 60 seconds, deeper cleaning removes SEI supplemental units without re-encoding video/audio. This can remove embedded captions and timing/user-data messages. Every decoded video frame and audio block is compared, together with codec, color, orientation and duration checks. Unsupported codecs, HDR, long videos or a failed comparison produce no output; use standard cleaning instead. This is deliberately narrower than desktop lossy re-encoding to honor quality preservation.
+
+Neither mode removes pixel-embedded watermarks, visual AI signals, third-party server records or existing social-platform labels. The report distinguishes removed blocks, essential preserved data and unchecked signals. It does not claim universal metadata coverage.

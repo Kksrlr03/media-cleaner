@@ -48,3 +48,11 @@ test('Invalid PNG checksum and truncated files fail safely',async()=>{
 test('HTML and unrecognized file data are rejected',async()=>{
   await assert.rejects(cleanImage(new TextEncoder().encode('<svg onload="alert(1)"></svg>')),/Choose a PNG/);
 });
+
+test('JPEG removes print density while retaining the compressed picture',async()=>{
+ const source=bytes('jpeg');const pos=Buffer.from(source).indexOf(Buffer.from('JFIF\0'));assert.ok(pos>0);
+ source[pos+7]=1;source[pos+8]=0;source[pos+9]=72;source[pos+10]=0;source[pos+11]=72;
+ const result=await cleanImage(source);assert.ok(result.report.removed.includes('JFIF print resolution'));
+ assert.equal(result.report.encodedImageDataIdentical,true);
+ const second=await cleanImage(result.bytes);assert.equal(second.report.fileBytesIdentical,true);assert.equal(second.report.removedCount,0);
+});

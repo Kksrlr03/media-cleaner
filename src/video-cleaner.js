@@ -77,13 +77,13 @@ function verifyTags(info){
   if(info.chapters?.length)throw new Error('Chapter metadata remains.');
   return retained;
 }
-export async function cleanVideo(file,onProgress){
+export async function cleanVideo(file,onProgress,deep=false){
   const ff=await getEngine(onProgress);
   const extension=file.name.split('.').pop().toLowerCase();
   const outputExtension=extension==='m4v'?'mp4':extension;
   if(!['mp4','mov','mkv','webm','avi'].includes(outputExtension))throw new Error('Choose MP4, MOV, WebM, MKV or AVI video. No conversion is used.');
   const input=`source.${extension}`,output=`cleaned.${outputExtension}`;
-  const files=[input,output,'source.json','result.json','source.sha256','result.sha256'];
+  const files=[input,output,'source.json','result.json','source.sha256','result.sha256','source.decoded','result.decoded'];
   try{
     onProgress(12,'Inspecting your video','Checking streams, color and orientation.');
     await ff.writeFile(input,new Uint8Array(await file.arrayBuffer()));
@@ -93,6 +93,11 @@ export async function cleanVideo(file,onProgress){
     if(!streams.some(s=>s.codec_type==='video'))throw new Error('No playable video stream was found.');
     const selected=[...streams.filter(s=>s.codec_type==='video'),...streams.filter(s=>s.codec_type==='audio')];
     const indexes=selected.map(s=>s.index);
+    if(deep){
+      const videos=selected.filter(s=>s.codec_type==='video');
+      if(videos.some(s=>s.codec_name!=='h264'||!/^(yuv420p|yuv422p|yuv444p|yuvj420p|yuvj422p|yuvj444p)$/.test(s.pix_fmt||'')||['smpte2084','arib-std-b67'].includes(s.color_transfer)||(s.side_data_list||[]).some(d=>/mastering|light|dovi|hdr/i.test(d.side_data_type))))throw new Error('Deeper video cleaning supports 8-bit SDR H.264 only. Use standard cleaning for HDR, HEVC and other codecs.');
+      if(!Number.isFinite(Number(before.format.duration))||Number(before.format.duration)>60)throw new Error('Deeper video verification is limited to 60 seconds in the browser. Use standard cleaning for longer clips.');
+    }
     onProgress(25,'Verifying original streams','Reading encoded video and audio—without changing them.');
     const inputHash=await hashes(ff,input,'source.sha256',indexes);
     const removed=[...Object.keys(before.format?.tags||{}).filter(key=>!['major_brand','minor_version','compatible_brands'].includes(key.toLowerCase()))];
@@ -105,6 +110,7 @@ export async function cleanVideo(file,onProgress){
     selected.forEach((stream,index)=>{
       args.push(`-metadata:s:${index}`,'encoder=',`-metadata:s:${index}`,'language=und',`-metadata:s:${index}`,`handler_name=${stream.codec_type==='video'?'VideoHandler':'SoundHandler'}`);
     });
+    if(deep)args.push('-bsf:v','filter_units=remove_types=6');
     if(['mp4','mov'].includes(outputExtension))args.push('-movflags','+faststart');
     args.push(output);
     onProgress(50,'Removing video metadata','Copying original media streams. No re-encoding.');
@@ -114,14 +120,27 @@ export async function cleanVideo(file,onProgress){
     const remaining=verifyTags(after);
     checkPreservation(selected,after.streams||[]);
     const outputHash=await hashes(ff,output,'result.sha256',(after.streams||[]).map(s=>s.index));
-    if(inputHash!==outputHash)throw new Error('The encoded video or audio changed. The output was discarded to protect quality.');
+    let decodedMediaIdentical=false;
+    if(deep){
+      const digest=async(path,name,mapping)=>{
+        const code=await ff.exec(['-hide_banner','-loglevel','error','-protocol_whitelist','file,pipe','-i',path,...mapping.flatMap(i=>['-map',`0:${i}`]),'-c:a','pcm_f64le','-f','framemd5',name],TIMEOUT);
+        if(code!==0)throw new Error('Decoded verification failed. Output discarded.');
+        return decoder.decode(await ff.readFile(name)).split('\n').filter(x=>x&&!x.startsWith('#')).map(x=>x.split(',').filter((_,i)=>i===0||i>=4).map(x=>x.trim()).join(',')).join('\n');
+      };
+      onProgress(85,'Verifying decoded video and audio','Checking every frame and audio block after supplemental-data removal.');
+      const first=await digest(input,'source.decoded',indexes),last=await digest(output,'result.decoded',after.streams.map(s=>s.index));
+      if(!first||first!==last)throw new Error('Decoded video or audio changed. Output discarded.');
+      decodedMediaIdentical=true;
+      if(inputHash!==outputHash)removed.push('H.264 SEI supplemental data (including user data and embedded captions, when present)');
+    }
+    if(!deep&&inputHash!==outputHash)throw new Error('The encoded video or audio changed. The output was discarded to protect quality.');
     const data=await ff.readFile(output);
-    onProgress(100,'Your clean video is ready','Original encoded video and audio verified unchanged.');
+    onProgress(100,'Your clean video is ready',deep?'Decoded video and audio verified unchanged.':'Original encoded video and audio verified unchanged.');
     return{blob:new Blob([data],{type:({mp4:'video/mp4',mov:'video/quicktime',webm:'video/webm',mkv:'video/x-matroska',avi:'video/x-msvideo'})[outputExtension]}),extension:outputExtension,report:{
-      version:1,kind:'video',method:'Lossless stream copy; no video or audio encoding',
-      removed:[...new Set(removed)],removedCount:removed.length,preserved:[...new Set([...remaining,'Color / HDR / orientation and codec data','Original encoded video and audio streams'])],
-      encodedStreamsIdentical:true,streamFingerprints:outputHash,inputBytes:file.size,outputBytes:data.length,
-      scope:'Container and stream descriptive metadata cleaned. Codec-level user data, in-frame watermarks and platform labels are not removed or verified.'
+      version:1,kind:'video',method:deep?'H.264 supplemental-data removal; decoded frame/audio verification':'Lossless stream copy; no video or audio encoding',
+      removed:[...new Set(removed)],removedCount:removed.length,preserved:[...new Set([...remaining,'Color / HDR / orientation and codec data',deep?'Verified decoded video and audio':'Original encoded video and audio streams'])],
+      encodedStreamsIdentical:inputHash===outputHash,decodedMediaIdentical,streamFingerprints:outputHash,inputBytes:file.size,outputBytes:data.length,
+      scope:deep?'Container/stream metadata and H.264 SEI supplemental data removed. Decoded frames and audio verified; embedded captions may be removed. Pixel watermarks and platform labels remain.':'Container and stream descriptive metadata cleaned. Codec-level user data, in-frame watermarks and platform labels are not removed or verified.'
     }};
   }finally{
     for(const path of files){try{await ff.deleteFile(path);}catch{}}

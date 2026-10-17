@@ -1,6 +1,6 @@
 import './style.css';
 import { createIcons, ScanLine, ArrowUpRight, Github, ShieldCheck, Upload, Image, Film, LockKeyhole, Sparkles, FileVideo, FileImage, Replace, MapPinOff, CameraOff, FileX2, CalendarX2, Check, CheckCheck, ChevronDown, Download, ArrowRight, ArrowDownToLine, Plus, Trash2, ScanEye, Fingerprint, HardDrive } from 'lucide';
-import { cleanImage, inspectFormat } from './image-cleaner.mjs';
+import { cleanImage, inspectFormat, sha256 } from './image-cleaner.mjs';
 
 const icons={ScanLine,ArrowUpRight,Github,ShieldCheck,Upload,Image,Film,LockKeyhole,Sparkles,FileVideo,FileImage,Replace,MapPinOff,CameraOff,FileX2,CalendarX2,Check,CheckCheck,ChevronDown,Download,ArrowRight,ArrowDownToLine,Plus,Trash2,ScanEye,Fingerprint,HardDrive};
 createIcons({icons});
@@ -65,22 +65,26 @@ function showResult(result){
   $('after-tab').disabled=false;preview(true);
   $('capabilities').hidden=true;$('result-summary').hidden=false;$('filename-section').hidden=false;$('result-actions').hidden=false;
   $('clean-button').hidden=true;$('download-button').hidden=false;
-  $('control-title').textContent='The same media. A cleaner copy.';
-  $('control-copy').textContent='Your cleaned file is ready. Switch between Original and Cleaned, then choose where to save it.';
-  $('state-badge').textContent='Verified';$('state-badge').classList.add('ready');
+  const unchanged=state.report.fileBytesIdentical;
+  $('control-title').textContent=unchanged?'No changes needed. File already clean.':'The same media. A cleaner copy.';
+  document.querySelector('.success-heading strong').textContent=unchanged?'Checked. No removable metadata found.':'Cleaned. Checked. Yours.';
+  $('control-copy').textContent=unchanged?'No removable descriptive metadata was found. The output is byte-for-byte identical to your original. AI-generated images can already have no descriptive metadata.':'Your output changed. Review the removed fields and preserved information below, then save your copy.';
+  $('state-badge').textContent=unchanged?'Unchanged · verified':'Changed · verified';$('state-badge').classList.add('ready');
   $('removed-count').textContent=String(state.report.removedCount);$('output-size').textContent=formatSize(state.blob.size);
   $('output-name').value=state.file.name.replace(/\.[^.]+$/,'')+'-clean';$('output-extension').textContent='.'+state.extension;
   $('action-note').textContent='Delete clears this tab’s working copy. Downloaded files stay on your device.';
   $('file-details').textContent=`${formatSize(state.blob.size)}  ·  ${state.extension.toUpperCase()}  ·  Quality preserved`;
   const details=$('verification-content');details.replaceChildren();
-  const note=document.createElement('p');note.className='verified-note';note.textContent=state.report.encodedStreamsIdentical?'Encoded video + audio hashes match. No re-encoding.':state.report.decodedPixelsIdentical?'Decoded image pixels verified unchanged. Lossless PNG export.':'Encoded image data hashes match. No recompression.';details.append(note);
-  for(const [title,items] of [['Removed',state.report.removed],['Preserved for correct display',state.report.preserved]]){
+  $('verification-details').open=true;
+  const comparison=document.createElement('p');comparison.className='verified-note';comparison.textContent=`${unchanged?'File bytes unchanged (SHA-256 match).':'File bytes changed (SHA-256 differs).'} Original: ${state.report.inputBytes.toLocaleString()} bytes. Output: ${state.blob.size.toLocaleString()} bytes. ${Math.max(0,state.report.inputBytes-state.blob.size).toLocaleString()} bytes removed.`;details.append(comparison);
+  const note=document.createElement('p');note.className='verified-note';note.textContent=state.report.encodedStreamsIdentical?'Encoded video + audio hashes match. No re-encoding.':state.report.decodedMediaIdentical?'Decoded video and audio verified unchanged. Supplemental H.264 data removed.':state.report.decodedPixelsIdentical?'Decoded image pixels verified unchanged. Lossless PNG export.':'Encoded image data hashes match. No recompression.';details.append(note);
+  for(const [title,items] of [['Removed',state.report.removed],['Preserved for correct display',state.report.preserved],['Outside this cleaning check',['Visible and invisible pixel watermarks; visual AI signals','Platform records and existing AI labels','Unknown embedded structures; codec user data in videos']]]){
     const heading=document.createElement('h4');heading.textContent=title;details.append(heading);
     const list=document.createElement('ul');
-    for(const value of items.length?items:['No matching descriptive fields found.']){const item=document.createElement('li');item.textContent=value;list.append(item);}details.append(list);
+    for(const value of items.length?items:[title==='Removed'?'No removable descriptive metadata found.':'No additional rendering metadata retained.']){const item=document.createElement('li');item.textContent=value;list.append(item);}details.append(list);
   }
   const scope=document.createElement('p');scope.textContent=state.report.scope;details.append(scope);
-  currentStep(2);toast('Cleaned and verified. Your original is untouched.');
+  currentStep(2);toast(unchanged?'Checked: no removable metadata found. File unchanged.':'Changes verified. Your original is untouched.');
 }
 async function clean(){
   if(!state.file||state.busy)return;
@@ -92,11 +96,13 @@ async function clean(){
     if(videoExtensions.has(ext)){
       videoTools=await import('./video-cleaner.js');
       if(generation!==state.generation)return;
-      result=await videoTools.cleanVideo(state.file,progress);
+      result=await videoTools.cleanVideo(state.file,progress,$('deep-clean').checked);
     }else{
       const bytes=new Uint8Array(await state.file.arrayBuffer());
       if(generation!==state.generation)return;
-      if(!inspectFormat(bytes)&&['bmp','tif','tiff'].includes(ext)){
+      if($('deep-clean').checked&&inspectFormat(bytes)){
+        const {freshImage}=await import('./fresh-image.js');result=await freshImage(bytes,progress);
+      }else if(!inspectFormat(bytes)&&['bmp','tif','tiff'].includes(ext)){
         videoTools=await import('./video-cleaner.js');result=await videoTools.cleanRasterImage(state.file,progress);
       }else{
         progress(35,'Removing descriptive metadata','Keeping encoded image data, colors and orientation intact.');
@@ -104,6 +110,11 @@ async function clean(){
       }
     }
     if(generation!==state.generation)return;
+    const outputBytes=result.blob?await result.blob.arrayBuffer():result.bytes;
+    const [inputSha256,outputSha256]=await Promise.all([sha256(await state.file.arrayBuffer()),sha256(outputBytes)]);
+    if(generation!==state.generation)return;
+    result.report={...result.report,inputSha256,outputSha256,fileBytesIdentical:inputSha256===outputSha256};
+    if(result.report.fileBytesIdentical){result.report.removed=[];result.report.removedCount=0;}
     setBusy(false);showResult(result);
   }catch(error){
     if(generation!==state.generation)return;
