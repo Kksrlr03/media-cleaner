@@ -110,3 +110,26 @@ test('Deeper mode rejects GIF instead of dropping animation',async({page})=>{
  await page.locator('#clean-button').click();await expect(page.locator('#status')).toContainText('standard cleaning');
  await expect(page.locator('#download-button')).toBeHidden();
 });
+
+test('10-bit SDR HEVC deep cleaning retains native pixel format',async({page})=>{
+ await page.goto('/');
+ await page.locator('#file-input').setInputFiles({name:'hevc10.mp4',mimeType:'video/mp4',buffer:Buffer.from(fixtures.hevc10,'base64')});
+ await page.locator('#deep-clean').check();await page.locator('#clean-button').click();await waitReady(page);
+ await expect(page.locator('#verification-content')).toContainText('Decoded video and audio verified unchanged');
+ await expect(page.locator('#verification-content')).toContainText('HEVC configuration SEI supplemental arrays');
+});
+test('User-provided HEVC regression (local optional)',async({page})=>{
+ test.skip(!process.env.MEDIA_TEST_VIDEO,'Local input supplied only when explicitly testing a user video.');
+ await page.goto('/');await page.locator('#file-input').setInputFiles(process.env.MEDIA_TEST_VIDEO);
+ await page.locator('#deep-clean').check();await page.locator('#clean-button').click();await waitReady(page);
+ await expect(page.locator('#verification-content')).toContainText('Decoded video and audio verified unchanged');
+});
+
+test('VP9 SDR deep conversion is explicitly labeled lossy',async({page})=>{
+ await page.goto('/');
+ await page.locator('#file-input').setInputFiles({name:'vp9.webm',mimeType:'video/webm',buffer:Buffer.from(fixtures.vp9,'base64')});
+ await page.locator('#deep-clean').check();await page.locator('#clean-button').click();await waitReady(page);
+ await expect(page.locator('.quality')).toHaveText('Re-encoded (lossy)');
+ await expect(page.locator('#output-extension')).toHaveText('.mp4');
+ await expect(page.locator('#verification-content')).toContainText('Full playback decoding checked');
+});

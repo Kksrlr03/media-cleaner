@@ -1,3 +1,4 @@
+import {cleanHevcConfig} from './hevc-config.mjs';
 let engine = null;
 let loading = null;
 let lastEngineError = '';
@@ -80,13 +81,14 @@ function verifyTags(info){
 export async function cleanVideo(file,onProgress,deep=false){
   const ff=await getEngine(onProgress);
   const extension=file.name.split('.').pop().toLowerCase();
-  const outputExtension=extension==='m4v'?'mp4':extension;
+  let outputExtension=extension==='m4v'?'mp4':extension;
   if(!['mp4','mov','mkv','webm','avi'].includes(outputExtension))throw new Error('Choose MP4, MOV, WebM, MKV or AVI video. No conversion is used.');
-  const input=`source.${extension}`,output=`cleaned.${outputExtension}`;
-  const files=[input,output,'source.json','result.json','source.sha256','result.sha256','source.decoded','result.decoded'];
+  const input=`source.${extension}`;let output=`cleaned.${outputExtension}`,reencoded=false;
+  const files=[input,output,'source.json','result.json','source.sha256','result.sha256','source.decoded','result.decoded','scrubbed.mp4'];
   try{
     onProgress(12,'Inspecting your video','Checking streams, color and orientation.');
-    await ff.writeFile(input,new Uint8Array(await file.arrayBuffer()));
+    const sourceBytes=new Uint8Array(await file.arrayBuffer());
+    await ff.writeFile(input,sourceBytes.slice());
     const before=await probe(ff,input,'source.json');
     if(!before.format?.format_name?.split(',').some(x=>allowedContainers.has(x)))throw new Error('Only regular video files are supported. Playlists and external media references are not accepted.');
     const streams=(before.streams||[]).filter(s=>(s.codec_type==='video'&&!s.disposition?.attached_pic)||s.codec_type==='audio');
@@ -95,7 +97,12 @@ export async function cleanVideo(file,onProgress,deep=false){
     const indexes=selected.map(s=>s.index);
     if(deep){
       const videos=selected.filter(s=>s.codec_type==='video');
-      if(videos.some(s=>s.codec_name!=='h264'||!/^(yuv420p|yuv422p|yuv444p|yuvj420p|yuvj422p|yuvj444p)$/.test(s.pix_fmt||'')||['smpte2084','arib-std-b67'].includes(s.color_transfer)||(s.side_data_list||[]).some(d=>/mastering|light|dovi|hdr/i.test(d.side_data_type))))throw new Error('Deeper video cleaning supports 8-bit SDR H.264 only. Use standard cleaning for HDR, HEVC and other codecs.');
+      if(videos.some(s=>['smpte2084','arib-std-b67'].includes(s.color_transfer)||(s.side_data_list||[]).some(d=>/mastering|light|dovi|hdr/i.test(d.side_data_type))))throw new Error('HDR video requires standard cleaning to preserve its dynamic range. Deep HDR conversion is not supported.');
+      reencoded=videos.some(s=>!['h264','hevc'].includes(s.codec_name)||!/^(yuv(?:j)?(?:420|422|444)p(?:10le|12le)?)$/.test(s.pix_fmt||''));
+      if(reencoded){
+        if(videos.some(s=>rotation(s)!==0))throw new Error('This rotated video requires standard cleaning; deep conversion cannot verify its orientation safely.');
+        outputExtension='mp4';output='converted.mp4';files.push(output);
+      }
       if(!Number.isFinite(Number(before.format.duration))||Number(before.format.duration)>60)throw new Error('Deeper video verification is limited to 60 seconds in the browser. Use standard cleaning for longer clips.');
     }
     onProgress(25,'Verifying original streams','Reading encoded video and audio—without changing them.');
@@ -105,25 +112,37 @@ export async function cleanVideo(file,onProgress,deep=false){
     if(before.chapters?.length)removed.push(`${before.chapters.length} chapter(s)`);
     const extras=(before.streams||[]).length-selected.length;
     if(extras)removed.push(`${extras} subtitle / attachment / data stream(s)`);
+    let remuxInput=input;
+    if(deep&&selected.some(s=>s.codec_name==='hevc')&&['mp4','mov','m4v'].includes(extension)){
+      const config=cleanHevcConfig(sourceBytes);
+      if(config.removed){await ff.writeFile('scrubbed.mp4',config.bytes);remuxInput='scrubbed.mp4';removed.push('HEVC configuration SEI supplemental arrays');}
+    }
     const maps=indexes.flatMap(index=>['-map',`0:${index}`]);
-    const args=['-hide_banner','-loglevel','error','-protocol_whitelist','file,pipe','-i',input,...maps,'-c','copy','-map_metadata','-1','-map_metadata:s','-1','-map_chapters','-1','-metadata','encoder=','-fflags','+bitexact'];
+    const args=['-hide_banner','-loglevel','error','-protocol_whitelist','file,pipe','-i',remuxInput,...maps,'-c','copy','-map_metadata','-1','-map_metadata:s','-1','-map_chapters','-1','-metadata','encoder=','-fflags','+bitexact'];
     selected.forEach((stream,index)=>{
       args.push(`-metadata:s:${index}`,'encoder=',`-metadata:s:${index}`,'language=und',`-metadata:s:${index}`,`handler_name=${stream.codec_type==='video'?'VideoHandler':'SoundHandler'}`);
     });
-    if(deep)args.push('-bsf:v','filter_units=remove_types=6');
+    if(reencoded){args.push('-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-bsf:v','filter_units=remove_types=6');}
+    else if(deep)selected.filter(s=>s.codec_type==='video').forEach((stream,index)=>args.push(`-bsf:v:${index}`,`filter_units=remove_types=${stream.codec_name==='hevc'?'39|40':'6'}`));
     if(['mp4','mov'].includes(outputExtension))args.push('-movflags','+faststart');
     args.push(output);
-    onProgress(50,'Removing video metadata','Copying original media streams. No re-encoding.');
+    onProgress(50,reencoded?'Rebuilding a clean MP4':'Removing video metadata',reencoded?'Deep mode converts to H.264/AAC; compression and quality may change.':'Copying original media streams. No re-encoding.');
     if(await ff.exec(args,TIMEOUT)!==0)throw new Error('This video cannot be cleaned in its original format without conversion. Your original is unchanged.');
     onProgress(74,'Checking the cleaned copy','Comparing original and cleaned stream fingerprints.');
     const after=await probe(ff,output,'result.json');
     const remaining=verifyTags(after);
-    checkPreservation(selected,after.streams||[]);
+    if(!reencoded)checkPreservation(selected,after.streams||[]);
+    else {
+      if(after.streams.length!==selected.length||Math.abs(Number(before.format.duration)-Number(after.format.duration))>.25)throw new Error('Converted stream count or duration changed unexpectedly; output discarded.');
+      selected.forEach((stream,index)=>{const dest=after.streams[index];if(stream.codec_type!==dest.codec_type||(stream.codec_type==='video'&&(stream.width!==dest.width||stream.height!==dest.height||dest.codec_name!=='h264')))throw new Error('Converted playback structure could not be verified.');});
+      if(await ff.exec(['-hide_banner','-v','error','-xerror','-i',output,'-map','0','-f','null','-'],TIMEOUT)!==0)throw new Error('Converted video failed full decoding; output discarded.');
+      removed.push('Original compressed encoding replaced by new H.264/AAC streams (lossy)');
+    }
     const outputHash=await hashes(ff,output,'result.sha256',(after.streams||[]).map(s=>s.index));
     let decodedMediaIdentical=false;
-    if(deep){
+    if(deep&&!reencoded){
       const digest=async(path,name,mapping)=>{
-        const code=await ff.exec(['-hide_banner','-loglevel','error','-protocol_whitelist','file,pipe','-i',path,...mapping.flatMap(i=>['-map',`0:${i}`]),'-c:a','pcm_f64le','-f','framemd5',name],TIMEOUT);
+        const code=await ff.exec(['-hide_banner','-loglevel','error','-protocol_whitelist','file,pipe','-i',path,...mapping.flatMap(i=>['-map',`0:${i}`]),'-c:a','pcm_f64le',...selected.filter(s=>s.codec_type==='video').flatMap((s,i)=>[`-pix_fmt:v:${i}`,s.pix_fmt]),'-f','framemd5',name],TIMEOUT);
         if(code!==0)throw new Error('Decoded verification failed. Output discarded.');
         return decoder.decode(await ff.readFile(name)).split('\n').filter(x=>x&&!x.startsWith('#')).map(x=>x.split(',').filter((_,i)=>i===0||i>=4).map(x=>x.trim()).join(',')).join('\n');
       };
@@ -131,16 +150,17 @@ export async function cleanVideo(file,onProgress,deep=false){
       const first=await digest(input,'source.decoded',indexes),last=await digest(output,'result.decoded',after.streams.map(s=>s.index));
       if(!first||first!==last)throw new Error('Decoded video or audio changed. Output discarded.');
       decodedMediaIdentical=true;
-      if(inputHash!==outputHash)removed.push('H.264 SEI supplemental data (including user data and embedded captions, when present)');
+      if(inputHash!==outputHash)removed.push(`${selected.some(s=>s.codec_name==='hevc')?'HEVC/H.265':'H.264'} SEI supplemental data (including user data and embedded captions, when present)`);
     }
     if(!deep&&inputHash!==outputHash)throw new Error('The encoded video or audio changed. The output was discarded to protect quality.');
     const data=await ff.readFile(output);
-    onProgress(100,'Your clean video is ready',deep?'Decoded video and audio verified unchanged.':'Original encoded video and audio verified unchanged.');
+    if(deep&&['mp4','mov'].includes(outputExtension)&&selected.some(s=>s.codec_name==='hevc')&&cleanHevcConfig(data).removed)throw new Error('HEVC configuration supplemental data remains; output discarded.');
+    onProgress(100,'Your clean video is ready',reencoded?'Converted video fully decoded and playback checked; lossy compression applied.':deep?'Decoded video and audio verified unchanged.':'Original encoded video and audio verified unchanged.');
     return{blob:new Blob([data],{type:({mp4:'video/mp4',mov:'video/quicktime',webm:'video/webm',mkv:'video/x-matroska',avi:'video/x-msvideo'})[outputExtension]}),extension:outputExtension,report:{
-      version:1,kind:'video',method:deep?'H.264 supplemental-data removal; decoded frame/audio verification':'Lossless stream copy; no video or audio encoding',
-      removed:[...new Set(removed)],removedCount:removed.length,preserved:[...new Set([...remaining,'Color / HDR / orientation and codec data',deep?'Verified decoded video and audio':'Original encoded video and audio streams'])],
-      encodedStreamsIdentical:inputHash===outputHash,decodedMediaIdentical,streamFingerprints:outputHash,inputBytes:file.size,outputBytes:data.length,
-      scope:deep?'Container/stream metadata and H.264 SEI supplemental data removed. Decoded frames and audio verified; embedded captions may be removed. Pixel watermarks and platform labels remain.':'Container and stream descriptive metadata cleaned. Codec-level user data, in-frame watermarks and platform labels are not removed or verified.'
+      version:1,kind:'video',method:reencoded?'Deep SDR conversion to H.264/AAC MP4; lossy':deep?'H.264 / HEVC supplemental-data removal; native-depth frame/audio verification':'Lossless stream copy; no video or audio encoding',
+      removed:[...new Set(removed)],removedCount:removed.length,preserved:[...new Set([...remaining,reencoded?'Resolution, duration and stream layout verified':'Color / HDR / orientation and codec data',reencoded?'Converted video fully decoded for validation':deep?'Verified decoded video and audio':'Original encoded video and audio streams'])],
+      reencoded,encodedStreamsIdentical:inputHash===outputHash,decodedMediaIdentical,verifiedPixelFormats:deep&&!reencoded?selected.filter(s=>s.codec_type==='video').map(s=>s.pix_fmt):undefined,streamFingerprints:outputHash,inputBytes:file.size,outputBytes:data.length,
+      scope:reencoded?'Deep conversion replaces original compressed video/audio and removes container metadata. This is lossy, can change quality, bit depth and audio, and does not remove pixel watermarks or guarantee platform labeling.':deep?'Container/stream metadata and supported H.264/HEVC packet SEI supplemental data cleaned. Codec configuration records may retain technical data. Decoded frames and audio verified; embedded captions may be removed. Pixel watermarks and platform labels remain.':'Container and stream descriptive metadata cleaned. Codec-level user data, in-frame watermarks and platform labels are not removed or verified.'
     }};
   }finally{
     for(const path of files){try{await ff.deleteFile(path);}catch{}}

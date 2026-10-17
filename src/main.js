@@ -33,6 +33,7 @@ function reset({message='',release=true}={}){
   $('state-badge').textContent='Ready when you are';$('state-badge').classList.remove('ready');
   $('action-note').textContent='Choose a file to get started. Your original stays untouched.';$('after-tab').disabled=true;
   $('before-tab').classList.add('active');$('after-tab').classList.remove('active');$('before-tab').setAttribute('aria-selected','true');$('after-tab').setAttribute('aria-selected','false');
+  $('quality-caption').textContent='No quality loss in normal mode';
   setBusy(false);currentStep(0);status('');if(message)toast(message);
 }
 function preview(cleaned=false){
@@ -71,13 +72,15 @@ function showResult(result){
   $('control-copy').textContent=unchanged?'No removable descriptive metadata was found. The output is byte-for-byte identical to your original. AI-generated images can already have no descriptive metadata.':'Your output changed. Review the removed fields and preserved information below, then save your copy.';
   $('state-badge').textContent=unchanged?'Unchanged · verified':'Changed · verified';$('state-badge').classList.add('ready');
   $('removed-count').textContent=String(state.report.removedCount);$('output-size').textContent=formatSize(state.blob.size);
+  $('quality-caption').textContent=state.report.reencoded?'Deep conversion: lossy compression':'Quality verified';
+  document.querySelector('.quality').textContent=state.report.reencoded?'Re-encoded (lossy)':'Preserved';
   $('output-name').value=state.file.name.replace(/\.[^.]+$/,'')+'-clean';$('output-extension').textContent='.'+state.extension;
   $('action-note').textContent='Delete clears this tab’s working copy. Downloaded files stay on your device.';
-  $('file-details').textContent=`${formatSize(state.blob.size)}  ·  ${state.extension.toUpperCase()}  ·  Quality preserved`;
+  $('file-details').textContent=`${formatSize(state.blob.size)}  ·  ${state.extension.toUpperCase()}  ·  ${state.report.reencoded?'Re-encoded (lossy)':'Quality preserved'}`;
   const details=$('verification-content');details.replaceChildren();
   $('verification-details').open=true;
   const comparison=document.createElement('p');comparison.className='verified-note';comparison.textContent=`${unchanged?'File bytes unchanged (SHA-256 match).':'File bytes changed (SHA-256 differs).'} Original: ${state.report.inputBytes.toLocaleString()} bytes. Output: ${state.blob.size.toLocaleString()} bytes. ${Math.max(0,state.report.inputBytes-state.blob.size).toLocaleString()} bytes removed.`;details.append(comparison);
-  const note=document.createElement('p');note.className='verified-note';note.textContent=state.report.encodedStreamsIdentical?'Encoded video + audio hashes match. No re-encoding.':state.report.decodedMediaIdentical?'Decoded video and audio verified unchanged. Supplemental H.264 data removed.':state.report.decodedPixelsIdentical?'Decoded image pixels verified unchanged. Lossless PNG export.':'Encoded image data hashes match. No recompression.';details.append(note);
+  const note=document.createElement('p');note.className='verified-note';note.textContent=state.report.reencoded?'Deep video conversion completed. Full playback decoding checked. Quality may differ; output is lossy.':state.report.decodedMediaIdentical?'Decoded video and audio verified unchanged at the original bit depth.':state.report.encodedStreamsIdentical?'Encoded video + audio hashes match. No re-encoding.':state.report.decodedPixelsIdentical?'Decoded image pixels verified unchanged. Lossless PNG export.':'Encoded image data hashes match. No recompression.';details.append(note);
   for(const [title,items] of [['Removed',state.report.removed],['Preserved for correct display',state.report.preserved],['Outside this cleaning check',['Visible and invisible pixel watermarks; visual AI signals','Platform records and existing AI labels','Unknown embedded structures; codec user data in videos']]]){
     const heading=document.createElement('h4');heading.textContent=title;details.append(heading);
     const list=document.createElement('ul');
